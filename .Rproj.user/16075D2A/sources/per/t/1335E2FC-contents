@@ -1,0 +1,555 @@
+---
+title: "Projekt: Value at Risk"
+date: today
+author: "Mikołaj Ziółkowski"
+editor: visual
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: Spis Treści
+    number-sections: true
+    number-depth: 3
+    embed-resources: true
+    html-math-method: katex
+    code-tools: true
+    code-block-bg: true
+    code-fold: true
+    code-summary: "Show and hide code"
+    link-external-icon: true
+    link-external-newwindow: true
+    smooth-scroll: true
+    self-contained: true
+    citation: true
+    theme: 
+        dark: solar
+        light: flatly
+    fontsize: 1.0em
+    linestretch: 1.3
+    fig-align: center
+execute: 
+  echo: true
+  error: false
+  warning: false
+  output: true
+editor_options: 
+  chunk_output_type: console
+---
+
+<style type="text/css"> body {text-align: justify} </style>
+
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+library(e1071)
+library(distr)
+library(knitr)
+library(psych)
+library(kableExtra)
+library(ggplot2)
+```
+
+
+# Wstęp
+
+## Dane 
+```{r}
+dane = read.csv("C:/Users/mikol/OneDrive/Desktop/ryzyko/amzn_us_d_2002.csv")
+log_returns <- diff(log(dane$Zamkniecie)) # logarytmiczne stopy zwrotu
+log_returns_strata <- -diff(log(dane$Zamkniecie)) # strata
+dane$Data=as.Date(dane$Data)
+window_size <- 500
+alpha <- 0.99
+dates <- dane$Data[(window_size + 1):length(dane$Data)]
+
+
+```
+
+Dane pochodzą ze strony stooq.pl , są to dane dziennych notowań giełdowych spółki Amazon.com Inc (AMZN.US) z zakresu od 2002-01-02 do 2024-12-31. Dane zawierają 6 zmiennych: Data, Otwarcie, Najwyższy, Najniższy, Zamnknięcie, Wolumen , oraz 5786 obserwacji.
+<br>
+Celem pracy jest wyznaczenie ciągu wartości 99% VaR i 99% ES z wykorzystaniem:
+- metody historycznej
+- metody historycznej z wagami
+- metody EWMA
+<br>
+Przyjęto 500-dniowe okno danych hitorycznych, obliczono logarytmiczne stopy zwrotu oraz stratę, która powstała w wyniku przemnożenia logarytmicznych stóp zwrotu przez -1.
+
+## Statystyki opisowe
+
+```{r}
+
+desc_Zamkniecie <- describe(dane$Zamkniecie)
+desc_LogReturns <- describe(log_returns)
+
+summary_stats <- data.frame(
+  Statystyka = c("Średnia", "Odchylenie standardowe", "Min", "Max", "Mediana", "Skośność", "Kurtoza"),
+  Zamkniecie = round(c(desc_Zamkniecie$mean, desc_Zamkniecie$sd, desc_Zamkniecie$min, desc_Zamkniecie$max, 
+                        desc_Zamkniecie$median, desc_Zamkniecie$skew, desc_Zamkniecie$kurtosis), 4),
+  Log_Returns = round(c(desc_LogReturns$mean, desc_LogReturns$sd, desc_LogReturns$min, desc_LogReturns$max, 
+                         desc_LogReturns$median, desc_LogReturns$skew, desc_LogReturns$kurtosis), 4)
+)
+
+knitr::kable(
+  summary_stats,
+  col.names = c("Statystyka", "Zamknięcie", "Logarytmiczne Stopy Zwrotu"),
+  caption = "Tabela: Statystyki opisowe dla Zamknięcia i Logarytmicznych Stóp Zwrotu",
+  align = "c",
+  booktabs = TRUE
+) %>%
+  kable_styling(latex_options = "hold_position", bootstrap_options = "striped") %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, width = "4cm") %>%
+  column_spec(2:3, width = "3cm")
+```
+
+**Wnioski**
+<br>
+<i>Zamknięcie</i>
+<br>
+1) Cena zamknięcia akcji średnio wynosiła 47.47 USD.
+<br>
+2) Wysoka zmienność, co wskazuje na duże wahania cen.
+<br>
+3) Lekko dodatnia skośność, co oznacza, że występują wartości odstające.
+<br>
+4) Kurtoza prawie zerowa, co oznacza, że rozkład jest zbliżony do normalnego.
+<br>
+<br>
+<i>Logarytmiczne stopy zwrotu<i>
+<br>
+1) Średnia bliska zeru, co sugeruje niewielki przeciętny dziennych wzrost wartości.
+<br>
+2) Niewielka zmienność.
+<br>
+3) Mediana logarytmicznych stóp zwrotu jest bliska zeru, co oznacza, że dla połowy dni zmiana ceny była nieznaczna.
+<br>
+4) Bardzo wysoka kurtoza, co wskazuje na obecność wielu ekstremalnych wartości.
+
+### Wykres wycen (zamnkniecia)
+
+```{r}
+
+# Wykres wyceny
+ggplot(dane, aes(x = as.Date(Data), y = Zamkniecie)) +
+  geom_line(color = "blue") +
+  labs(x = "Data", y = "Cena zamknięcia", title = "Wycena akcji Apple (AAPL)") +
+  scale_x_date(breaks = seq(as.Date("2002-01-02"), as.Date("2024-12-31"), by = "year"),
+               labels = format(seq(as.Date("2002-01-02"), as.Date("2024-12-31"), by = "year"), "%Y")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Na podstawie wykresu wycen można zauważyć, iż znaczący wzrost cen zamknięcia rozpoczyna się w okolicach 2016 roku. Może to być spowodowane kilkoma czynnikami, np: Amazon Web Services staje się głównum źródłem zysków,Amazon w 2015 staje się liderem e-commerce w USA, rozpoczęcie inwestycji w AI, m.in: Alexa i Amazon Echo.
+
+### Wykres logarytmicznych stóp zwrotu
+
+```{r}
+dane_log_returns <- data.frame(Data = dane$Data[2:length(dane$Data)], LogReturns = log_returns)
+ggplot(dane_log_returns, aes(x = as.Date(Data), y = LogReturns)) +
+  geom_line(color = "red") +
+  labs(x = "Data", y = "Logarytmiczne stopy zwrotu", title = "Logarytmiczne stopy zwrotu Apple (AAPL)") +
+  scale_x_date(breaks = seq(as.Date("2002-01-02"), as.Date("2024-12-31"), by = "year"),
+               labels = format(seq(as.Date("2002-01-02"), as.Date("2024-12-31"), by = "year"), "%Y")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Warotść oczekiwana jest bliska zero. Wartości zgromadzone wokół średniej.
+
+# VaR
+
+## Metoda historyczna
+
+```{r}
+
+compute_VaR_ES <- function(returns_window, alpha) {
+  VaR <- quantile(returns_window, alpha)
+  ES <- mean(returns_window[returns_window > VaR])
+  return(list(VaR = VaR, ES = ES))
+}
+
+VaR_values <- numeric()
+ES_values <- numeric()
+
+# Obliczenie VaR i ES dla okna
+for (i in 1:(length(log_returns_strata) - window_size + 1)) {
+  window <- log_returns_strata[i:(i + window_size - 1)]
+  res <- compute_VaR_ES(window, alpha)
+  VaR_values <- c(VaR_values, res$VaR)
+  ES_values <- c(ES_values, res$ES)
+}
+
+plot(as.Date(dates), VaR_values, type = "l", col = "red", 
+     xlab = "Data", ylab = "Wartość", main = "99% VaR i ES - Metoda Historyczna",
+     ylim = range(VaR_values, ES_values))
+lines(as.Date(dates), ES_values, col = "blue")
+legend("topright", legend=c("VaR", "ES"), fill=c("red", "blue"), cex=0.7)
+
+```
+
+W początkowych lata widać stopniowy wzrost ryzyka, po czym następuje szybki spadek oraz zaraz gwałtowny wzrost ES, może to być związane z kryzysem finansowym w latach 2008/2009. Od 2020 skok wartości ,spowodowany najprawdopodobniej pandemią COVID-19. W latach 2023-24 stopniowy spadek ryzyka. Jednak wyniki w tej metodzie dają równe prawdopodobieństwa oraz nie biorą pod uwagę heteroskedastyczności.
+
+
+## Metoda historyczna z wagami
+
+Można powiedzieć, iż metoda historyczna z wagami to ulepszona wersja metody historycznej, która przydziela wagi każdemu scenariuszowi. Dzięki temu lepiej uwzględnia zmieniającą się dynamikę rynku.
+
+```{r}
+compute_weighted_VaR_ES <- function(returns_window, alpha) {
+  n <- length(returns_window)
+  weights <- (alpha^(n:1 - 1) * (1 - alpha)) / (1 - alpha^n)#wagi
+  sorted_returns <- sort(returns_window)# Sortowanie stóp zwrotu
+  sorted_weights <- weights[order(returns_window)]# Przypisanie wag do posortowanych stóp zwrotu
+  cumulative_weights <- cumsum(sorted_weights)# Obliczenie skumulowanych wag
+  # indeksu VaR (pierwsza wartość, gdzie skumulowana waga >= alpha)
+  VaR_index <- which(cumulative_weights >= alpha)[1]
+  VaR <- sorted_returns[VaR_index]
+  #ES
+  ES <- sum(sorted_returns[VaR_index:length(sorted_returns)] * 
+              sorted_weights[VaR_index:length(sorted_weights)]) / 
+    sum(sorted_weights[VaR_index:length(sorted_weights)])
+  
+  return(list(VaR = VaR, ES = ES))
+}
+
+weighted_VaR_values <- numeric()
+weighted_ES_values <- numeric()
+
+for (i in 1:(length(log_returns_strata) - window_size + 1)) {
+  window <- log_returns_strata[i:(i + window_size - 1)]
+  res <- compute_weighted_VaR_ES(window, alpha)
+  weighted_VaR_values <- c(weighted_VaR_values, res$VaR)
+  weighted_ES_values <- c(weighted_ES_values, res$ES)
+}
+
+plot(as.Date(dates), weighted_VaR_values, type = "l", col = "red", lty = 1,
+     xlab = "Data", ylab = "Wartość", main = "99% VaR i ES - Metoda Historyczna z Wagami",
+     ylim = range(weighted_VaR_values, weighted_ES_values))
+lines(as.Date(dates), weighted_ES_values, col = "blue", lty = 1)
+legend("topright", legend=c("VaR", "ES"), fill=c("red", "blue"), cex=0.7)
+
+
+```
+ 
+W latach 2008-2009 widać gwałtowny wzrost ryzyka związany z globalnym kryzysem finansowym. W 2021 silny skok ES i VaR związany z pandemią COVID-19. Po 2022 stopniowy spadek ryzyka.
+
+
+## Metoda EWMA
+
+Metoda EWMA (Exponentially Weighted Moving Average) jest techniką stosowaną do modelowania zmienności finansowej, w której ostatnie obserwacje mają większą wagę niż starsze dane. Pozwala to na szybkie reagowanie na zmiany rynkowe. Metoda ta odrzuca założenie o homoskedastyczności strat.
+
+```{r}
+
+# Funkcja do obliczania zmienności EWMA
+ewma_volatility <- function(returns, lambda) {
+  n <- length(returns)
+  sigma_squared <- numeric(n)
+  sigma_squared[1] <- var(returns)
+  for (t in 2:n) {
+    sigma_squared[t] <- lambda * sigma_squared[t - 1] + (1 - lambda) * returns[t - 1]^2
+  }
+  return(sqrt(sigma_squared))
+}
+
+lambda <- 0.94  # Współczynnik wygładzania w modelu EWMA
+
+# Obliczenie zmienności EWMA dla całego szeregu
+zmewma <- ewma_volatility(log_returns_strata, lambda)
+
+ewma_VaR_values <- numeric(length(log_returns_strata) - window_size + 1)
+ewma_ES_values <- numeric(length(log_returns_strata) - window_size + 1)
+
+for (i in 1:(length(log_returns_strata) - window_size + 1)) {
+  window <- log_returns_strata[i:(i + window_size - 1)]
+  
+  # Skalowanie zwrotów zgodnie z metodą EWMA
+  scenariuszEwma <- window * zmewma[i + window_size - 1] / zmewma[i:(i + window_size - 1)]
+  
+  VaR_scaled <- quantile(scenariuszEwma, alpha)
+  ES_scaled <- mean(scenariuszEwma[scenariuszEwma > VaR_scaled])
+  
+  ewma_VaR_values[i] <- VaR_scaled
+  ewma_ES_values[i] <- ES_scaled
+}
+
+plot(as.Date(dates), ewma_VaR_values, type = "l", col = "red", lty = 1,
+     xlab = "Data", ylab = "Wartość", main = "99% VaR i ES - Metoda EWMA",
+     ylim = range(ewma_VaR_values, ewma_ES_values)) 
+lines(as.Date(dates), ewma_ES_values, col = "blue", lty = 1)  
+legend("topright", legend = c("VaR", "ES"), fill = c("red", "blue"), cex = 0.7)
+
+```
+
+
+W tej metodzie można zauważyć bardziej reagujące zmiany. W okolicach 2015 roku widać zwiększone ryzyko, może być to wynik kryzysu na chińskim rynku akcji. Natomiast podwyższona wartość w okolicach 2020 roku wynika z pandemii COVID19. W latach 2022/23 również widać wzrost ryzyka, co może być wynikiem inflacji oraz spadku wycen spółek technologicnzych. Warto zauważyć,iż od 2023 roku zmienność Amazon spada, co może wskazywać na względną stabilizacje.
+
+# Testy Wsteczne
+
+Testy są obliczane dla każdego okna oddzielnie, a wyniki są przedstawiane w tabeli.
+
+## Test kupca
+
+Hipotezy:
+<br>
+- H0 : VaR jest dobrze wyliczony
+- H1 : VaR jest źle obliczony
+
+
+```{r}
+kupiec_test <- function(VaR_hits, alpha) {
+  n <- length(VaR_hits)
+  x <- sum(VaR_hits)
+  pi_hat <- x / n
+  L0 <- x * log(alpha) + (n - x) * log(1 - alpha)
+  L1 <- x * log(pi_hat) + (n - x) * log(1 - pi_hat)
+  LR_uc <- -2 * (L0 - L1)
+  p_value <- 1 - pchisq(LR_uc, df = 1)
+  list(exceptions = x, LR_uc = LR_uc, p_value = p_value)
+}
+
+metody <- c("Historyczna", "Hist. z wagami", "EWMA")
+tabela_test_kupiec <- data.frame(Metoda = metody, Odrzucone = 0, Nieodrzucone = 0)
+
+oblicz_test <- function(VaR_values) {
+  temp <- sapply(1:(length(log_returns_strata) - window_size + 1), function(i) {
+    VaR_hit <- ifelse(log_returns_strata[i:(i + window_size - 1)] > VaR_values[i], 1, 0)
+    ifelse(kupiec_test(VaR_hit, 0.01)$p_value < 0.05, 1, 0)
+  })
+  sum(temp, na.rm = TRUE)
+}
+
+tabela_test_kupiec$Odrzucone[1] <- oblicz_test(VaR_values)
+tabela_test_kupiec$Nieodrzucone[1] <- length(log_returns_strata) - 499 - tabela_test_kupiec$Odrzucone[1]
+
+tabela_test_kupiec$Odrzucone[2] <- oblicz_test(weighted_VaR_values)
+tabela_test_kupiec$Nieodrzucone[2] <- length(log_returns_strata) - 499 - tabela_test_kupiec$Odrzucone[2]
+
+tabela_test_kupiec$Odrzucone[3] <- oblicz_test(ewma_VaR_values)
+tabela_test_kupiec$Nieodrzucone[3] <- length(log_returns_strata) - 499 - tabela_test_kupiec$Odrzucone[3]
+
+kable(tabela_test_kupiec, format = "html") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+
+```
+
+**WNIOSKI**
+<br>
+W przypadku metody historycznej brak odrzuconych testów, wskazuje, że oszacowanie VaR jest zgodne z liczbą przekroczeń, jednak w przypadku tej metody jest to dość oczywiste, ponieważ liczba wyjątków dla okna jest równa liczbie jaką zakłada kwantyl dla którego jest obliczony VaR.
+<br>
+Metoda historyczna z wagami odrzuca znaczną ilość testów, jednak prawie połowę więcej przyjmuj jako dobrze obliczone.
+<br>
+Meotda EWMA, Liczba odrzuceń jest prawie równa liczbie przyjęć, jednak dość duża liczba odrzuconych testów, wskazuje, iż model ten najczęściej nie spełnia warunków testu Kupca.
+
+
+## Test świateł
+
+Test świateł (Traffic Light Test) to metoda oceny jakości modelu VaR. Polega on na klasyfikacji liczby przekroczeń VaR do trzech stref (zielonej, żółtej i czerwonej), gdzie zielona oznacza dobrą jakość modelu, żółta sygnalizuje potencjalne problemy, a czerwona wskazuje na istotne niedoszacowanie ryzyka.
+
+```{r}
+
+tabela_test_swiatla = data.frame("Zielone" = rep(1,3),
+                                 "Żółte" = rep(1,3),
+                                 "Czerwone" = rep(1,3),
+                                 row.names = c("Historyczna", "Hist. z wagami",
+                                               "EWMA"))
+
+test_swiatel <- function(VaR_hits) {
+  
+  n <- length(VaR_hits)
+  exceptions <- sum(VaR_hits)    
+  
+  green_limit <- qbinom(c(0.001,0.95), n, 1 - alpha)
+  yellow_limit <- qbinom(c(0.95,0.999), n, 1 - alpha)
+  
+  if (exceptions <= green_limit[2]) {
+    zone <- "Green"
+  } else if (exceptions <= yellow_limit[2]) {
+    zone <- "Yellow"
+  } else {
+    zone <- "Red"
+  }
+  
+  list(
+    exceptions = exceptions,
+    green_limit = green_limit,
+    zone = zone
+  )
+}
+
+#metoda historyczna
+temp_hist=c()
+for(i in 1:(length(log_returns_strata) - window_size +1)){
+  Var_hit_hist=ifelse(log_returns_strata[i:(i+499)] > VaR_values[i], 1, 0)
+  temp_hist[i]=ifelse(test_swiatel(Var_hit_hist)$zone == "Green", "Zielone", 
+                      ifelse(test_swiatel(Var_hit_hist)$zone == "Yellow",
+                             "Żółte", "Czerwone"))
+}
+
+tab_hist = table(temp_hist)
+tabela_test_swiatla[1,1]=ifelse(is.na(tab_hist["Zielone"]), 0, tab_hist["Zielone"])
+tabela_test_swiatla[1,2]=ifelse(is.na(tab_hist["Żółte"]), 0, tab_hist["Żółte"])
+tabela_test_swiatla[1,3]=ifelse(is.na(tab_hist["Czerwone"]), 0, tab_hist["Czerwone"])
+
+
+
+#metoda hist z wagami
+temp_wagi=c()
+for(i in 1:(length(log_returns_strata) - window_size+1)){
+  Var_hit_wagi=ifelse(log_returns_strata[i:(i+499)] > weighted_VaR_values[i], 1, 0)
+  temp_wagi[i]=ifelse(test_swiatel(Var_hit_wagi)$zone == "Green", "Zielone", 
+                      ifelse(test_swiatel(Var_hit_wagi)$zone == "Yellow",
+                             "Żółte", "Czerwone"))
+}
+tab_wagi = table(temp_wagi)
+tabela_test_swiatla[2,1]=ifelse(is.na(tab_wagi["Zielone"]), 0, tab_wagi["Zielone"])
+tabela_test_swiatla[2,2]=ifelse(is.na(tab_wagi["Żółte"]), 0, tab_wagi["Żółte"])
+tabela_test_swiatla[2,3]=ifelse(is.na(tab_wagi["Czerwone"]), 0, tab_wagi["Czerwone"])
+
+# metoda ewma
+temp_ewma=c()
+for(i in 1:(length(log_returns_strata) - window_size+1)){
+  Var_hit_ewma=ifelse(log_returns_strata[i:(i+499)] > ewma_VaR_values[i], 1, 0)
+  temp_ewma[i]=ifelse(test_swiatel(Var_hit_ewma)$zone == "Green", "Zielone", 
+                      ifelse(test_swiatel(Var_hit_ewma)$zone == "Yellow",
+                             "Żółte", "Czerwone"))
+}
+tab_ewma = table(temp_ewma)
+tabela_test_swiatla[3,1]=ifelse(is.na(tab_ewma["Zielone"]), 0, tab_ewma["Zielone"])
+tabela_test_swiatla[3,2]=ifelse(is.na(tab_ewma["Żółte"]), 0, tab_ewma["Żółte"])
+tabela_test_swiatla[3,3]=ifelse(is.na(tab_ewma["Czerwone"]), 0, tab_ewma["Czerwone"])
+
+tabela_test_swiatla %>%
+  kbl(col.names = c("Metoda", "Zielone", "Żółte", "Czerwone"), format = "html") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  column_spec(2, color = "green") %>%
+  column_spec(3, color = "orange") %>%
+  column_spec(4, color = "red")
+```
+
+**WNIOSKI**
+<br>
+We wszystkich trzech metodach większość przypadków znajduje się w strefie zielonej. Dla metody historycznej wszystkie przypadki znajdują się w strefie zielonej. Metoda hist. z wagami oraz metoda EWMA znajdują się częsciowo w strefie żółtej i czerwonej. Jednak w przypadku metody EWMA dość znaczna liczba przypadków jest w strefie czerwonej, co może sugerować niedoszacowanie ryzyka.
+
+## Test Christoffersena
+
+Test Christoffersona bada niezależność sekwencji przekroczeń wartości zagrożonej (VaR) poprzez analizę przejść między dniami z i bez przekroczeń. Ocena skupia się na autokorelacji w występowaniu strat, co pozwala sprawdzić, czy model VaR poprawnie odzwierciedla zmienność rynku w czasie.
+<br>
+Hipotezy:<br>
+H0: Przekroczenia VaR są niezależne w czasie
+<br>
+H1: Przekroczenia VaR nie są niezależne w czasie
+
+```{r}
+tabela_test_christoff = data.frame("odrzucone" = rep(1,3),
+                            "nieodrzucone" = rep(1,3),
+                            row.names = c("Historyczna", "Hist. z wagami",
+                                          "EWMA"))
+
+test_christoffersona <- function(VaR_hits) {
+  # Budowanie macierzy przejść
+  transitions <- table(factor(VaR_hits[-length(VaR_hits)], levels = c(0, 1)), 
+                       factor(VaR_hits[-1], levels = c(0, 1)))  
+  # Liczby przejść
+  n00 <- transitions[1, 1]  
+  n01 <- transitions[1, 2]  
+  n10 <- transitions[2, 1]  
+  n11 <- transitions[2, 2] 
+  
+  # Prawdopodobieństwa przejść
+  p0 <- ifelse(n00 + n01 > 0, n01 / (n00 + n01), 0)
+  p1 <- ifelse(n10 + n11 > 0, n11 / (n10 + n11), 0)
+  pi_hat <- ifelse(n00 + n01 + n10 + n11 > 0, (n01 + n11) / (n00 + n01 + n10 + n11), 0)
+  
+  # Zmiana dla przypadków równych zero
+  p0 <- max(p0, 0.000001)
+  p1 <- max(p1, 0.000001)
+  pi_hat <- max(pi_hat, 0.000001)
+  
+  # Statystyka log-likelihood ratio
+  L_ind <- n00 * log(1 - p0) + n01 * log(p0) +
+    n10 * log(1 - p1) + n11 * log(p1)
+  L_un <- (n00 + n10) * log(1 - pi_hat) + (n01 + n11) * log(pi_hat)
+  LR_ind <- -2 * (L_un - L_ind)
+
+  p_value <- 1 - pchisq(LR_ind, df = 1)
+  
+  list(
+    LR_ind = LR_ind,
+    p_value = p_value
+  )
+}
+
+#metoda historyczna
+temp_hist=c()
+for(i in 1:(length(log_returns_strata) - window_size+1)){
+  Var_hit_hist=ifelse(log_returns_strata[i:(i+499)] > VaR_values[i], 1, 0)
+  temp_hist[i]=ifelse(test_christoffersona(Var_hit_hist)$p_value < 0.05, 1, 0)
+}
+
+tabela_test_christoff[1,1]=sum(temp_hist, na.rm=T)
+tabela_test_christoff[1,2]=length(log_returns_strata)-499 - sum(temp_hist, na.rm=T)
+
+
+#metoda hist z wagami
+temp_wagi=c()
+for(i in 1:(length(log_returns_strata) - window_size+1)){
+  Var_hit_wagi=ifelse(log_returns_strata[i:(i+499)] > weighted_VaR_values[i], 1, 0)
+  temp_wagi[i]=ifelse(test_christoffersona(Var_hit_wagi)$p_value < 0.05, 1, 0)
+}
+tabela_test_christoff[2,1]=sum(temp_wagi)
+tabela_test_christoff[2,2]=length(log_returns_strata)-499 - sum(temp_wagi)
+
+#metoda ewma
+temp_ewma=c()
+for(i in 1:(length(log_returns_strata) - window_size+1)){
+  Var_hit_ewma=ifelse(log_returns_strata[i:(i+499)] > ewma_VaR_values[i], 1, 0)
+  temp_ewma[i]=ifelse(test_christoffersona(Var_hit_ewma)$p_value < 0.05, 1, 0)
+}
+tabela_test_christoff[3,1]=sum(temp_ewma, na.rm=T)
+tabela_test_christoff[3,2]=length(log_returns_strata)-499 - sum(temp_ewma, na.rm=T)
+
+tabela_test_christoff <- data.frame(
+  Metoda = c("Historyczna", "Hist. z wagami", "EWMA"),
+  Odrzucone = c(sum(temp_hist, na.rm = TRUE),
+                sum(temp_wagi, na.rm = TRUE),
+                sum(temp_ewma, na.rm = TRUE)),
+  Nieodrzucone = c(length(log_returns_strata) - 499 - sum(temp_hist, na.rm = TRUE),
+                   length(log_returns_strata) - 499 - sum(temp_wagi, na.rm = TRUE),
+                   length(log_returns_strata) - 499 - sum(temp_ewma, na.rm = TRUE))
+)
+
+kable(tabela_test_christoff, format = "html", col.names = c("Metoda", "Odrzucone", "Nieodrzucone")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:3, width = "5em")
+
+```
+
+Test wskazuje, iż w większości przypadków przkroczenia są nieżależne w czasie dla każdej z metod. Metoda EWMA osiągnęła najlepszy wyniki, co sugeruje, że lepiej uchwyciła dynamikę ryzyka w czasie.
+
+# Podsumowanie
+
+Ranking według testów,od najlepszego do najsłabszego wyniku(najlepszy=największa liczba testów nieodrzuconych)
+<br>
+Test Kupca:
+<br>
+1. historyczna<br>
+2. historyczna z wagami<br>
+3. EWMA<br>
+<br>
+Test Świateł:<br>
+1. historyczna<br>
+2. historyczna z wagami<br>
+3. EWMA<br>
+<br>
+Test Christoffersena:<br>
+1. EWMA<br>
+2. hisoryczna z wagami<br>
+3. historyczna<br>
+
+<br>
+Analizując powyższe wyniki, można zauważyć, że metoda historyczna uzyskała najlepsze wyniki w testach Kupca i Świateł. Oznacza to, że dobrze przewiduje ryzyko w długim okresie i charakteryzuje się wysoką stabilnością. Jednak jej największą wadą jest brak elastyczności – traktuje wszystkie dane historyczne z taką samą wagą, co może prowadzić do niedoszacowania ryzyka w dynamicznie zmieniających się warunkach rynkowych. Z kolei metoda EWMA uzyskała najlepszy wynik w teście Christoffersena, co sugeruje, że dobrze radzi sobie z dynamicznymi zmianami i adaptacją do nowych danych. Jednak w testach Kupca i Świateł wypada najsłabiej, co może wskazywać na większą niestabilność i nadmierną reakcję na krótkoterminowe wahania. Najbardziej zbalansowaną metodą wydaje się metoda historyczna z wagami. Pomimo że nie osiągnęła pierwszego miejsca w żadnym z testów, zajęła drugie miejsce we wszystkich trzech testach. Łączy stabilność metody historycznej z pewnym stopniem elastyczności, przypisując większą wagę nowszym obserwacjom. Dzięki temu lepiej oddaje rzeczywistą zmienność waloru i pozwala na bardziej precyzyjne modelowanie ryzyka.
+
+Na podstawie analizy stwierdzam, iż najlepszą metodą do wybranych danych jest metoda historyczna z wagami, ponieważ nie traktuje wszystkich obserwacji jednakowo, co pozwala lepiej odzwierciedlać zmieniające się warunki rynkowe, również dość dobrze wypadła w przeprowadzonych testach wstecznych.
+
+
